@@ -11,7 +11,7 @@
 
 
 const pb_field_t HwPullVoiceReq_fields[3] = {
-    PB_FIELD(  1, STRING  , REQUIRED, CALLBACK, FIRST, HwPullVoiceReq, serialNum, serialNum, 0),
+    PB_FIELD(  1, STRING  , REQUIRED, STATIC, FIRST, HwPullVoiceReq, serialNum, serialNum, 0),
     PB_FIELD(  2, INT32   , REQUIRED, STATIC  , OTHER, HwPullVoiceReq, reqTime, serialNum, 0),
     PB_LAST_FIELD
 };

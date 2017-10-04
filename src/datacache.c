@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "Encoder.h"
-#include "Decoder.h"
+//#include "Decoder.h"
 #include <protob/pb_encode.h>
 #include <protob/pb_decode.h>
 #include <protob/pb_common.h>
@@ -21,91 +21,386 @@
 
 #include <protob/ConnectReq.pb.h>
 
+#include "datacache.h"
 
-#include "sqlite3.h"
+#define DATABASE_PATH "datacache.db"
 
 extern char msgid[16];
 extern int sockee;
 
-enum sql_exec_t {
-	SQL_DEFAULT = 0,
-	SQL_INSERT,
-	SQL_SELECT,
-	SQL_UPDATE,
-	SQL_DELETE,
-};
+datacache_t datacache = DATACACHE_ZERO;
 
-struct datacache {
-	sqlite3 *db;
-	char *filepath;
-	unsigned char flag;
-	enum sql_exec_t sql_exec;
-	unsigned int updflag;
-	int updtype;
-};
-
-#define DATABASE_PATH "datacache.db"
-static struct datacache *pcache = NULL;
+inline void datacache_zero(datacache_t *data)
+{
+	data->db = NULL;
+	data->filepath = NULL;
+	data->upd_flag = 0;
+	memset(data->dev_info.serial_num, '\0', sizeof(data->dev_info.serial_num));
+	memset(data->dev_info.nick_name, '\0', sizeof(data->dev_info.nick_name));
+	data->dev_info.upd_flag = 0;
+}
 
 static const char *SQL_CREATE[] = {
-	"create table if not exists devInfo(serialNum nvarchar(100), nickname nvarchar(100), updFlags integer)",
+	"create table if not exists devInfo(serialNum nvarchar(100), nickName nvarchar(100), updFlags integer)",
 	"create table if not exists groupDiscuss(discussId integer, discussContent nvarchar(100), createTime integer)",
 	"create table if not exists groupShare(voiceId integer, voicePath nvarchar(100), shareTime integer, voiceType integer)",
 	"create table if not exists userDefinedList(relType integer, relId nvarchar(100), allCount integer)",
-	"create table if not exists voiceList(relType integer, relId nvarchar(100), allCount integer)",
-	"create table if not exists albumList(voiceId integer, netPath nvarchar(100), localPath nvarchar(100), \
-				voiceName nvarchar(100))"
+	"create table if not exists voiceList(voiceId integer, voiceName nvarchar(100), voicePath nvarchar(100), \
+										voicePic nvarchar(100), voiceLength integer, voiceDesc nvarchar(100), \
+										voiceSize integer, downloadTime integer, isCustom bool, appVoiceType integer)",
+	"create table if not exists albumList(albumId integer, albumName nvarchar(100), albumCover nvarchar(100), \
+										albumDesc nvarchar(100), albumVoiceCount integer, dlStatus integer)"
 };
+
+static int sql_table_rows_callback(void *para, int n_column,
+	char **column_value, char **column_name)
+{
+	int *count = (int *)para;
+	*count = atoi(column_value[0]);
+	return 0;
+}
+
+static int sql_table_rows(const char *table, const sqlite3 *db)
+{
+	int count = -1;
+	char sql[64] = {'\0'};
+	char *errmsg;
+
+	sprintf(sql, "select count(*) from %s", table);
+	if (SQLITE_OK != sqlite3_exec(db, sql, sql_table_rows_callback, &count, &errmsg)) {
+		printf("sqlite exec failed : %s\n", errmsg);
+		return -1;
+	}
+
+	return count;
+}
+
+int devinfo_exec_sql(dc_sql_exec_type_t type, devinfo_fields_t field, dc_dev_info_t *devinfo)
+{
+	int ret;
+	char sql[128] = {'\0'};
+	char *errmsg;
+
+	if (type == SQL_INSERT) {
+		snprintf(sql, sizeof(sql), "insert into devInfo(serialNum,nickName,updFlags) values('%s','%s',%d)", \
+			devinfo->serial_num, devinfo->nick_name, datacache.upd_flag);
+	} else if (type == SQL_UPDATE) {
+		switch (field) {
+		case DEVINFO_DEFAULT:
+			snprintf(sql, sizeof(sql), "update devInfo set nickName='%s',updFlags=%d where serialNum='%s'", \
+				devinfo->nick_name, datacache.upd_flag, devinfo->serial_num);
+			break;
+		case DEVINFO_NICKNAME:
+			snprintf(sql, sizeof(sql), "update devInfo set nickName='%s' where serialNum='%s'", \
+				devinfo->nick_name, devinfo->serial_num);
+			break;
+		case DEVINFO_UPDFLAGS:
+			snprintf(sql, sizeof(sql), "update devInfo set updFlags=%d where serialNum='%s'", \
+				datacache.upd_flag, devinfo->serial_num);
+			break;
+		}
+	} else if (type == SQL_SELECT) {
+		switch (field) {
+		case DEVINFO_DEFAULT:
+			snprintf(sql, sizeof(sql), "select * from devInfo where serialNum='%s'", devinfo->serial_num);
+			break;
+		case DEVINFO_NICKNAME:
+			snprintf(sql, sizeof(sql), "select nickName from devInfo where serialNum='%s'", \
+				devinfo->serial_num);
+			break;
+		case DEVINFO_UPDFLAGS:
+			snprintf(sql, sizeof(sql), "select updFlags from devInfo where serialNum='%s'", \
+				devinfo->serial_num);
+			break;
+		}
+	} else {
+		printf("invalid sql exec type.\n");
+		return -1;
+	}
+
+	if (type != SQL_SELECT) {
+		ret = sqlite3_exec(datacache.db, sql, NULL, NULL, &errmsg);
+		if (SQLITE_OK != ret) {
+			printf("sqlite exec failed : %d: %s\n", ret, errmsg);
+			return ret;
+		}
+	} else {
+		char **result = NULL;
+		int nrow, ncolumn;
+
+		ret = sqlite3_get_table(datacache.db, sql, &result, &nrow, &ncolumn, &errmsg);
+		if (SQLITE_OK != ret) {
+			printf("sqlite3_get_table failed : %d: %s\n", ret, errmsg);
+			sqlite3_free_table(result);
+			return ret;
+		}
+
+		if (field == DEVINFO_DEFAULT) {
+			strcpy(devinfo->nick_name, result[ncolumn+1]);
+			devinfo->upd_flag = atoi(result[ncolumn+2]);
+		} else if (field == DEVINFO_NICKNAME) {
+			strcpy(devinfo->nick_name, result[ncolumn]);
+		} else if (field == DEVINFO_UPDFLAGS) {
+			devinfo->upd_flag = atoi(result[ncolumn]);
+		}
+
+		sqlite3_free_table(result);
+	}
+
+	return 0;
+}
+
+int groupdiscuss_exec_sql(dc_sql_exec_type_t type, dc_group_discuss_t *obj)
+{
+	int ret;
+	char *errmsg;
+	char sql[128] = {'\0'};
+
+	switch (type) {
+	case SQL_INSERT:
+		snprintf(sql, sizeof(sql), "insert into groupDiscuss(discussId,discussContent,createTime) values(%d,'%s',%d)", \
+			obj->discussId, obj->discussContent, obj->createTime);
+		break;
+	case SQL_DELETE:
+		if (obj == NULL) {
+			strcpy(sql, "delete from groupDiscuss");
+		} else {
+			snprintf(sql, sizeof(sql), "delete from groupDiscuss where discussId=%d", obj->discussId);
+		}
+		break;
+	case SQL_SELECT:
+		snprintf(sql, sizeof(sql), "select * from groupDiscuss where discussId=%d", obj->discussId);
+		break;
+	default:
+		break;
+	}
+
+	if (type != SQL_SELECT) {
+		if (SQLITE_OK != sqlite3_exec(datacache.db, sql, NULL, NULL, &errmsg)) {
+			printf("sqlite exec failed : %s\n", errmsg);
+			return -1;
+		}
+	} else {
+		char **result = NULL;
+		int nrow, ncolumn;
+
+		ret = sqlite3_get_table(datacache.db, sql, &result, &nrow, &ncolumn, &errmsg);
+		if (SQLITE_OK != ret) {
+			printf("sqlite3_get_table failed : %d: %s\n", ret, errmsg);
+			sqlite3_free_table(result);
+			return -1;
+		}
+
+		memcpy(obj->discussContent, result[ncolumn+1], sizeof(obj->discussContent));
+		obj->createTime = atoi(result[ncolumn+2]);
+
+		sqlite3_free_table(result);
+	}
+
+	return 0;
+}
+
+int groupshare_exec_sql(dc_sql_exec_type_t type, dc_group_voice_t *obj)
+{
+	int ret;
+	char *errmsg;
+	char sql[128] = {'\0'};
+
+	switch (type) {
+	case SQL_INSERT:
+		snprintf(sql, sizeof(sql), "insert into groupShare(voiceId,voicePath,shareTime,voiceType) values(%d,'%s',%d,%d)", \
+			obj->voiceId, obj->voicePath, obj->shareTime, obj->voiceType);
+		break;
+	case SQL_DELETE:
+		if (obj == NULL) {
+			strcpy(sql, "delete from groupShare");
+		} else {
+			snprintf(sql, sizeof(sql), "delete from groupShare where voiceId=%d", obj->voiceId);
+		}
+		break;
+	case SQL_SELECT:
+		snprintf(sql, sizeof(sql), "select * from groupShare where voiceId=%d", obj->voiceId);
+		break;
+	default:
+		break;
+	}
+
+	if (type != SQL_SELECT) {
+		if (SQLITE_OK != sqlite3_exec(datacache.db, sql, NULL, NULL, &errmsg)) {
+			printf("sqlite exec failed : %s\n", errmsg);
+			return -1;
+		}
+	} else {
+		char **result = NULL;
+		int nrow, ncolumn;
+
+		ret = sqlite3_get_table(datacache.db, sql, &result, &nrow, &ncolumn, &errmsg);
+		if (SQLITE_OK != ret) {
+			printf("sqlite3_get_table failed : %d: %s\n", ret, errmsg);
+			sqlite3_free_table(result);
+			return -1;
+		}
+
+		memcpy(obj->voicePath, result[ncolumn+1], sizeof(obj->voicePath));
+		obj->shareTime = atoi(result[ncolumn+2]);
+		obj->voiceType = atoi(result[ncolumn+3]);
+
+		sqlite3_free_table(result);
+	}
+
+	return 0;
+}
+
+int voicelist_exec_sql(dc_sql_exec_type_t type, dc_voicelist_t *obj)
+{
+	int ret;
+	char *errmsg;
+	char sql[128] = {'\0'};
+
+	switch (type) {
+	case SQL_INSERT:
+		snprintf(sql, sizeof(sql), "insert into voiceList(voiceId,voiceName,voicePath,voicePic, \
+					voiceLength,voiceDesc,voiceSize,downloadTime,isCustom,appVoiceType) \
+					values(%d,'%s','%s','%s',%d,'%s',%d,%d,%d,%d)", \
+			obj->voiceId, obj->voiceName, obj->voicePath, obj->voicePic, obj->voiceLength, \
+			obj->voiceDesc, obj->voiceSize, obj->downloadTime, obj->isCustom, obj->appVoiceType);
+		break;
+	case SQL_DELETE:
+		snprintf(sql, sizeof(sql), "delete from voiceList where voiceId=%d", obj->voiceId);
+		break;
+	case SQL_SELECT:
+		snprintf(sql, sizeof(sql), "select * from voiceList where voiceId=%d", obj->voiceId);
+		break;
+	default:
+		break;
+	}
+
+	if (type != SQL_SELECT) {
+		if (SQLITE_OK != sqlite3_exec(datacache.db, sql, NULL, NULL, &errmsg)) {
+			printf("sqlite exec failed : %s\n", errmsg);
+			return -1;
+		}
+	} else {
+		char **result = NULL;
+		int nrow, ncolumn;
+
+		ret = sqlite3_get_table(datacache.db, sql, &result, &nrow, &ncolumn, &errmsg);
+		if (SQLITE_OK != ret) {
+			printf("sqlite3_get_table failed : %d: %s\n", ret, errmsg);
+			sqlite3_free_table(result);
+			return -1;
+		}
+
+		memcpy(obj->voiceName, result[ncolumn+1], sizeof(obj->voiceName));
+		memcpy(obj->voicePath, result[ncolumn+2], sizeof(obj->voicePath));
+		memcpy(obj->voicePic, result[ncolumn+3], sizeof(obj->voicePic));
+		obj->voiceLength= atoi(result[ncolumn+4]);
+		memcpy(obj->voiceDesc, result[ncolumn+5], sizeof(obj->voiceDesc));
+		obj->voiceSize = atoi(result[ncolumn+6]);
+		obj->downloadTime = atoi(result[ncolumn+7]);
+		obj->isCustom = atoi(result[ncolumn+8]);
+		obj->appVoiceType = atoi(result[ncolumn+9]);
+
+		sqlite3_free_table(result);
+	}
+
+	return 0;
+}
+
+int albumlist_exec_sql(dc_sql_exec_type_t type, dc_albumlist_t *obj)
+{
+	int ret;
+	char *errmsg;
+	char sql[128] = {'\0'};
+
+	switch (type) {
+	case SQL_INSERT:
+		snprintf(sql, sizeof(sql), "insert into albumList(albumId,albumName,albumCover,albumDesc,albumVoiceCount,dlStatus) \
+					values(%d,'%s','%s','%s',%d,%d)", \
+			obj->albumId, obj->albumName, obj->albumCover, obj->albumDesc, obj->albumVoiceCount, obj->dlStatus);
+		break;
+	case SQL_DELETE:
+		snprintf(sql, sizeof(sql), "delete from albumList where albumId=%d", obj->albumId);
+		break;
+	case SQL_SELECT:
+		snprintf(sql, sizeof(sql), "select * from albumList where albumId=%d", obj->albumId);
+		break;
+	default:
+		break;
+	}
+
+	if (type != SQL_SELECT) {
+		if (SQLITE_OK != sqlite3_exec(datacache.db, sql, NULL, NULL, &errmsg)) {
+			printf("sqlite exec failed : %s\n", errmsg);
+			return -1;
+		}
+	} else {
+		char **result = NULL;
+		int nrow, ncolumn;
+
+		ret = sqlite3_get_table(datacache.db, sql, &result, &nrow, &ncolumn, &errmsg);
+		if (SQLITE_OK != ret) {
+			printf("sqlite3_get_table failed : %d: %s\n", ret, errmsg);
+			sqlite3_free_table(result);
+			return -1;
+		}
+
+		memcpy(obj->albumName, result[ncolumn+1], sizeof(obj->albumName));
+		memcpy(obj->albumCover, result[ncolumn+2], sizeof(obj->albumCover));
+		memcpy(obj->albumDesc, result[ncolumn+3], sizeof(obj->albumDesc));
+		obj->albumVoiceCount = atoi(result[ncolumn+4]);
+		obj->dlStatus= atoi(result[ncolumn+5]);
+
+		sqlite3_free_table(result);
+	}
+
+	return 0;
+}
 
 static int request_dev_info(void)
 {
 	int ret;
 	unsigned char buf[128];
-	int len;
+	int msg_len;
 	int i;
 	char *destdata = NULL;
-	char *errmsg;
-
-	printf(">>>>>>>>>>>>>>> request_dev_info() <<<<<<<<<<<<<<<<<\n");
-
+/*
 	HwInfoReq *message = (HwInfoReq *)malloc(sizeof(HwInfoReq));
 	if (message == NULL) {
 		printf("malloc failed.\n");
 		return -1;
 	}
-
-	memset(buf, 0, sizeof(buf));
-	pb_ostream_t output = pb_ostream_from_buffer(buf, sizeof(buf));
+*/
+	HwInfoReq message = HwInfoReq_init_zero;
+	pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
 
 	for (i = 0; i < 16; i++)
-		message->serialNum[i] = msgid[i];
+		message.serialNum[i] = msgid[i];
 
-	ret = pb_encode(&output, HwInfoReq_fields , message);
-	len = output.bytes_written;
+	ret = pb_encode(&stream, HwInfoReq_fields , &message);
+	msg_len = stream.bytes_written;
 	if (!ret) {
-		printf("Encoding failed: %s\n", PB_GET_ERROR(&output));  
+		printf("Encoding failed: %s\n", PB_GET_ERROR(&stream));  
 		goto err1;
 	}
 
-	printf(">>>>>>>>>>>>>>> pb_encode: ", buf);
-	for (i = 0; i < len; i++) printf("%u",buf[i]);
-	printf("<<<<<<<<<<<<<<<<<\n");
+	printf(">> pb_encode: ");
+	for (i = 0; i < msg_len; i++) printf("%d",buf[i]);
+	printf(" <<\n");
 
-	destdata = (char*) malloc((60 + len) * sizeof(char));
+	destdata = (char *)malloc((60 + msg_len) * sizeof(char));
 	if (destdata == NULL) {
 		printf("malloc failed.\n");
 		goto err1;
 	}
 
-	memset(destdata, 0, sizeof(destdata));
-	encode(0xf011f082, 1, buf, len, destdata);
-	ret = send(sockee, destdata, 60 + len, 0);
+	encode(0xf011f082, 1, buf, msg_len, destdata);
+	ret = send(sockee, destdata, 60 + msg_len, 0);
 	if (ret < 0) {
 		printf("socket send failed!\n");
 		goto err2;
 	}
-	printf(">>>>>>>>>>>>>>> request_dev_info OK. <<<<<<<<<<<<<<<<<\n");
-
+#if 0
 	uint8_t recvbuff[1024];
 	memset(recvbuff,0,sizeof(recvbuff));
 	ret = recv(sockee, recvbuff, sizeof(recvbuff), 0);
@@ -133,73 +428,80 @@ static int request_dev_info(void)
 	}
 	printf(">>>>>>>>>>>>>>> nickName: %s <<<<<<<<<<<<<<<<<\n", rmessage->nickName);
 
-	char sql[128] = {'\0'};
-	switch (pcache->sql_exec) {
-	case SQL_INSERT:
-		snprintf(sql, sizeof(sql), "insert into devInfo(serialNum,nickName,updFlags) values('%s','%s',0)", msgid, rmessage->nickName);
-		break;
-	case SQL_UPDATE:
-		snprintf(sql, sizeof(sql), "update devInfo set nickname='%s' where serialNum='%s'", rmessage->nickName, msgid);
-		break;
-	default:
-		break;
-	}
-	pcache->sql_exec = SQL_DEFAULT;
-
-	ret = sqlite3_exec(pcache->db, sql, NULL, NULL, &errmsg);
-	if (SQLITE_OK != ret) {
-		printf("sqlite exec failed : %d: %s\n", ret, errmsg);
-		goto err3;
-	}
-
-	free(rmessage);
+	//datacache.dev_info.nick_name = ;
+	//datacache.dev_info.serial_num= ;
+	devinfo_exec_sql(SQL_UPDATE, &datacache);
+#endif
+	//free(rmessage);
 	free(destdata);
-	free(message);
+	//free(message);
 
 	return 0;
 
-err3:
-	free(rmessage);
+//err3:
+	//free(rmessage);
 err2:
 	free(destdata);
 err1:
-	free(message);
+	//free(message);
 	return ret;
 }
 
-static bool group_discuss_callback(pb_istream_t *stream, const pb_field_t *field, void **arg)
+static bool group_discuss_objdiscuss(pb_istream_t *stream, const pb_field_t *field, void **arg)
 {
-	char *errmsg;
-
-	printf(">>>>>>>>>>>>>>> group_discuss_callback() <<<<<<<<<<<<<<<<<\n");
+	pb_wire_type_t wire_type;
+    uint32_t tag;
+    bool eof;
 
     HwPullDiscussResp_ObjDiscuss *obj = (HwPullDiscussResp_ObjDiscuss *)malloc(sizeof(HwPullDiscussResp_ObjDiscuss));
 	if (obj == NULL) {
 		printf("malloc failed\n");
 		return false;
 	}
-    
+    pb_decode_tag(stream, &wire_type, &tag, &eof);
     if (!pb_decode(stream, HwPullDiscussResp_ObjDiscuss_fields, obj)) {
-		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(stream));
+		fprintf(stderr, "%s(): Decode failed: %s\n", __func__, PB_GET_ERROR(stream));
 		free(obj);
         return false;
     }
 
-	printf(">>>>>>>>>>>>>>> decode group discuss: %d %s %d\n", obj->discussId, obj->discussContent, obj->createTime);
+	printf("## discussId: %d\n", obj->discussId);
+	printf("## discussContent: %s\n", obj->discussContent);
+	printf("## createTime: %d\n", obj->createTime);
 
-    char sql[128] = {'\0'};
-	snprintf(sql, sizeof(sql), "insert into groupDiscuss(discussId,discussContent,createTime) values(%d,'%s',%d)", \
-			obj->discussId, obj->discussContent, obj->createTime);
-	if (SQLITE_OK != sqlite3_exec(pcache->db, sql, NULL, NULL, &errmsg)) {
-		printf("sqlite exec failed : %s\n", errmsg);
-		free(obj);
-		return false;
-	}
+	dc_group_discuss_t dis;
+	dis.discussId = obj->discussId;
+	memcpy(dis.discussContent, obj->discussContent, sizeof(dis.discussContent));
+	dis.createTime = obj->createTime;
+	groupdiscuss_exec_sql(SQL_INSERT, &dis);
 
 	free(obj);
     return true;
 }
 
+int response_group_discuss(char *msgBytes, int len)
+{
+	HwPullDiscussResp *response = (HwPullDiscussResp *)malloc(sizeof(HwPullDiscussResp));
+	if (response == NULL) {
+		printf("malloc failed.\n");
+		return -1;
+	}
+
+	pb_istream_t input = pb_istream_from_buffer(msgBytes, len);
+	response->result.objDiscuss.funcs.decode = &group_discuss_objdiscuss;
+	if (!pb_decode(&input, HwPullDiscussResp_fields, response)) {
+		fprintf(stderr, "%s(): Decode failed: %s\n", __func__, PB_GET_ERROR(&input));
+		free(response);
+		return -1;
+	}
+
+	printf("## state: %d\n", response->state);
+	printf("## msg: %s\n", response->msg);
+	printf("## thisReqTime: %d\n", response->result.thisReqTime);
+
+	free(response);
+	return 0;
+}
 static int request_group_discuss(void)
 {
 	int ret;
@@ -208,21 +510,17 @@ static int request_group_discuss(void)
 	int i;
 	char *destdata = NULL;
 
-	printf(">>>>>>>>>>>>>>> request_group_discuss() <<<<<<<<<<<<<<<<<\n");
-
 	HwPullDiscussReq *message = (HwPullDiscussReq *)malloc(sizeof(HwPullDiscussReq));
 	if (message == NULL) {
 		printf("malloc failed.\n");
 		return -1;
 	}
 
-	memset(buf, 0, sizeof(buf));
 	pb_ostream_t output = pb_ostream_from_buffer(buf, sizeof(buf));
 
 	for (i = 0; i < 16; i++)
 		message->serialNum[i] = msgid[i];
-	message->has_reqTime = 0;
-	message->reqTime = 0;
+	message->has_reqTime = false;
 	
 	ret = pb_encode(&output, HwPullDiscussReq_fields , message);
 	len = output.bytes_written;
@@ -231,65 +529,26 @@ static int request_group_discuss(void)
 		goto err1;
 	}
 
-	printf(">>>>>>>>>>>>>>> pb_encode: ", buf);
-	for (i = 0; i < len; i++) printf("%u",buf[i]);
-	printf("<<<<<<<<<<<<<<<<<\n");
-
-	destdata = (char*) malloc((60 + len) * sizeof(char));
+	destdata = (char*)malloc((60 + len) * sizeof(char));
 	if (destdata == NULL) {
 		printf("malloc failed.\n");
 		goto err1;
 	}
 
-	memset(destdata, 0, sizeof(destdata));
 	encode(0xf011f037, 1, buf, len, destdata);
 	ret = send(sockee, destdata, 60 + len, 0);
 	if (ret < 0) {
 		printf("socket send failed!\n");
 		goto err2;
 	}
-	printf(">>>>>>>>>>>>>>> request_group_discuss OK. <<<<<<<<<<<<<<<<<\n");
 
-	uint8_t recvbuff[1024];
-	memset(recvbuff,0,sizeof(recvbuff));
-	ret = recv(sockee, recvbuff, sizeof(recvbuff), 0);
-	if (ret < 0) {
-		printf("recv error\n");
-		goto err2;
-	}
-		
-	char msgBytes[1024];
-	int msglen = 0;
-	bzero(msgBytes, sizeof(msgBytes));
-	decode_msgbuf(recvbuff, ret, msgBytes, &msglen);
+	printf("## %s() return OK.\n", __func__);
 
-	printf(">>>>>>>>>>>>>> msgbyte:");
-	for (i = 0; i < msglen; i++) printf("%x",msgBytes[i]);
-	printf(" <<<<<<<<<<<<<<<<<\n");
-
-	HwPullDiscussResp *response = (HwPullDiscussResp *)malloc(sizeof(HwPullDiscussResp));
-	if (response == NULL) {
-		printf("malloc failed.\n");
-		goto err2;
-	}
-
-	pb_istream_t input = pb_istream_from_buffer(msgBytes, msglen);
-	response->objDiscuss.funcs.decode = &group_discuss_callback;
-	if (!pb_decode(&input, HwPullDiscussResp_fields, response)) {
-		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(&input));
-		goto err3;
-	}
-
-	printf(">>>>>>>>>>>>>>> thisReqTime: %ld\n", response->thisReqTime);
-
-	free(response);
 	free(destdata);
 	free(message);
 
 	return 0;
 
-err3:
-	free(response);
 err2:
 	free(destdata);
 err1:
@@ -297,8 +556,9 @@ err1:
 	return ret;
 }
 
-static bool group_share_callback(pb_istream_t *stream, const pb_field_t *field, void **arg)
+static bool group_share_objvoice(pb_istream_t *stream, const pb_field_t *field, void **arg)
 {
+#if 0
 	char *errmsg;
 
 	HwPullVoiceResp_ObjVoice *obj = (HwPullVoiceResp_ObjVoice *)malloc(sizeof(HwPullVoiceResp_ObjVoice));
@@ -314,24 +574,40 @@ static bool group_share_callback(pb_istream_t *stream, const pb_field_t *field, 
     }
 
 	printf("decode group share: %d %s %d %d\n", obj->voiceId, obj->voicePath, obj->shareTime, obj->voiceType);
+	groupshare_exec_sql(SQL_INSERT, obj);
 
-    char sql[128] = {'\0'};
-	snprintf(sql, sizeof(sql), "insert into groupShare(voiceId,voicePath,shareTime,voiceType) values(%d,'%s',%d,%d)", \
-			obj->voiceId, obj->voicePath, obj->shareTime, obj->voiceType);
-	if (SQLITE_OK != sqlite3_exec(pcache->db, sql, NULL, NULL, &errmsg)) {
-		printf("sqlite exec failed : %s\n", errmsg);
-		free(obj);
-		return false;
+	free(obj);
+#endif
+	return true;
+}
+
+int response_group_share(char *msgBytes, int len)
+{
+#if 0
+	HwPullVoiceResp *response = (HwPullVoiceResp *)malloc(sizeof(HwPullVoiceResp));
+	if (response == NULL) {
+		printf("malloc failed\n");
+		return -1;
 	}
 
-	free(obj);	
-	return true;
+	pb_istream_t input = pb_istream_from_buffer(msgBytes, msglen);
+	response->objVoice.funcs.decode = &group_share_objvoice;
+	if (!pb_decode(&input, HwPullVoiceResp_fields, response)) {
+		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(&input));
+		free(response);
+		return -1;
+	}
+
+	free(response);
+#endif
+	return 0;
 }
 
 static int request_group_share(void)
 {
 	int ret;
-	unsigned char buf[BUFSIZ];
+	int i;
+	unsigned char buf[128];
 	int len;
 	char *destdata = NULL;
 
@@ -341,17 +617,16 @@ static int request_group_share(void)
 		return -1;
 	}
 
-	memset(message->serialNum, '\0', sizeof(message->serialNum));
-	memcpy(message->serialNum, msgid, sizeof(msgid));
-	message->has_reqTime = 0;
-	message->reqTime = 0;
-
-	bzero(buf, BUFSIZ);
 	pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
-	len = stream.bytes_written;
+
+	for (i = 0; i < 16; i++)
+		message->serialNum[i] = msgid[i];
+	message->has_reqTime = false;
+
 	ret = pb_encode(&stream, HwPullVoiceReq_fields , message);
+	len = stream.bytes_written;
 	if (!ret) {
-		printf("Encoding failed: %s\n", PB_GET_ERROR(&stream));  
+		printf("%s(): Encoding failed: %s\n", __func__, PB_GET_ERROR(&stream));  
 		goto err1;
 	}
 
@@ -361,51 +636,20 @@ static int request_group_share(void)
 		goto err1;
 	}
 
-	memset(destdata, 0, sizeof(destdata));
 	encode(0xf011f039, 1, buf, len, destdata);
-	ret = send(sockee, destdata, sizeof(destdata), 0);
+	ret = send(sockee, destdata, 60+len, 0);
 	if (ret < 0) {
 		printf("socket send failed!\n");
 		goto err2;
 	}
-	printf("%---------------------- request_group_share OK. ----------------------%\n");
 
-	uint8_t recvbuff[1024];
-	memset(recvbuff,0,sizeof(recvbuff));
-	ret = recv(sockee, recvbuff, sizeof(recvbuff), 0);
-	if (ret < 0) {
-		printf("recv error\n");
-		goto err2;
-	}
+	printf("## %s() return OK.\n", __func__);
 
-	char msgBytes[1024];
-	int msglen = 0;
-	bzero(msgBytes, sizeof(msgBytes));
-	decode_msgbuf(recvbuff, ret, msgBytes, &msglen);
-
-	HwPullVoiceResp *response = (HwPullVoiceResp *)malloc(sizeof(HwPullVoiceResp));
-	if (response == NULL) {
-		printf("malloc failed\n");
-		goto err2;
-	}
-
-	pb_istream_t input = pb_istream_from_buffer(msgBytes, msglen);
-	response->objVoice.funcs.decode = &group_share_callback;
-	if (!pb_decode(&input, HwPullVoiceResp_fields, response)) {
-		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(&input));
-		goto err3;
-	}
-
-	printf("%---------------------- thisReqTime: %d\n", response->thisReqTime);
-
-	free(response);
 	free(destdata);
 	free(message);
 
 	return 0;
 
-err3:
-	free(response);
 err2:
 	free(destdata);
 err1:
@@ -413,78 +657,45 @@ err1:
 	return ret;
 }
 
+int response_user_defined_list(char *msgBytes, int len)
+{
+
+	return 0;
+}
+
 static int request_user_defined_list(void)
 {
-	printf("%---------------------- request_user_defined_list OK. ----------------------%\n");
+
+	printf("## %s() return OK.\n", __func__);
+
+	return 0;
+}
+
+int response_voice_list(char *msgBytes, int len)
+{
+
 	return 0;
 }
 
 static int request_voice_list(void)
 {
-	/* get sound list */
 
-	/* update sound list */
+	printf("## %s() return OK.\n", __func__);
 
-	/* start download */
-
-	/* update cache */
-
-	/* push sound list status */
-
-	printf("%---------------------- request_voice_list OK. ----------------------%\n");
 	return 0;
 }
 
-static bool dlingvoice_callback(pb_istream_t *stream, const pb_field_t *field, void **arg)
+int response_album_list(char *msgBytes, int len)
 {
-	HwDLLocalStatusResp_ObjVoice *obj = (HwDLLocalStatusResp_ObjVoice *)malloc(sizeof(HwDLLocalStatusResp_ObjVoice));
-	if (obj == NULL) {
-		printf("malloc failed\n");
-		return false;
-	}
-    
-    if (!pb_decode(stream, HwDLLocalStatusResp_ObjVoice_fields, obj)) {
-		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(stream));
-		free(obj);
-        return false;
-    }
 
-    printf("%d %s %s %s\n", obj->voiceId, obj->netPath, obj->localPath, obj->voiceName);
-
-	/* save sqlite */
-
-	free(obj);
-
-	return true;
-}
-
-static bool pausevoice_callback(pb_istream_t *stream, const pb_field_t *field, void **arg)
-{
-	HwDLLocalStatusResp_ObjVoice *obj = (HwDLLocalStatusResp_ObjVoice *)malloc(sizeof(HwDLLocalStatusResp_ObjVoice));
-	if (obj == NULL) {
-		printf("malloc failed\n");
-		return false;
-	}
-    
-    if (!pb_decode(stream, HwDLLocalStatusResp_ObjVoice_fields, obj)) {
-		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(stream));
-		free(obj);
-        return false;
-    }
-
-    printf("%d %s %s %s\n", obj->voiceId, obj->netPath, obj->localPath, obj->voiceName);
-
-	/* save sqlite */
-
-	free(obj);
-
-	return true;
+	return 0;
 }
 
 static int request_album_list(void)
 {
 	int ret;
-	unsigned char buf[BUFSIZ];
+	int i;
+	unsigned char buf[128];
 	int len;
 	char *destdata = NULL;
 
@@ -494,13 +705,13 @@ static int request_album_list(void)
 		return -1;
 	}
 
-	memset(message->serialNum, '\0', sizeof(message->serialNum));
-	memcpy(message->serialNum, msgid, sizeof(msgid));
-
-	bzero(buf, sizeof(buf));
 	pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
-	len = stream.bytes_written;
+
+	for (i = 0; i < 16; i++)
+		message->serialNum[i] = msgid[i];
+	
 	ret = pb_encode(&stream, HwDLLocalStatusReq_fields , message);
+	len = stream.bytes_written;
 	if (!ret) {
 		printf("Encoding failed: %s\n", PB_GET_ERROR(&stream));  
 		goto err1;
@@ -512,52 +723,20 @@ static int request_album_list(void)
 		goto err1;
 	}
 
-	memset(destdata, 0, sizeof(destdata));
 	encode(0xf011f069, 1, buf, len, destdata);
-	ret = send(sockee, destdata, sizeof(destdata), 0);
+	ret = send(sockee, destdata, 60+len, 0);
 	if (ret < 0) {
 		printf("socket send failed!\n");
 		goto err2;
 	}
-	printf("%---------------------- request_album_list OK. ----------------------%\n");
 
-	uint8_t recvbuff[1024];
-	memset(recvbuff,0,sizeof(recvbuff));
-	ret = recv(sockee, recvbuff, sizeof(recvbuff), 0);
-	if (ret < 0) {
-		printf("recv error\n");
-		goto err2;
-	}
+	printf("## %s() return OK.\n", __func__);
 
-	char msgBytes[1024];
-	int msglen = 0;
-	bzero(msgBytes, sizeof(msgBytes));
-	decode_msgbuf(recvbuff, ret, msgBytes, &msglen);
-
-	HwDLLocalStatusResp *response = (HwDLLocalStatusResp *)malloc(sizeof(HwDLLocalStatusResp));
-	if (response == NULL) {
-		printf("malloc failed\n");
-		goto err2;
-	}
-
-	pb_istream_t input = pb_istream_from_buffer(msgBytes, msglen);
-	response->dlingVoice.funcs.decode = &dlingvoice_callback;
-	response->pauseVoice.funcs.decode = &pausevoice_callback;
-	if (!pb_decode(&input, HwDLLocalStatusResp_fields, response)) {
-		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(&input));		
-		goto err3;
-	}
-
-	printf("%---------------------- dledVoiceId: %d\n", response->dledVoiceId);
-
-	free(response);
 	free(destdata);
 	free(message);
 
 	return 0;
 
-err3:
-	free(response);
 err2:
 	free(destdata);
 err1:
@@ -565,103 +744,75 @@ err1:
 	return ret;
 }
 
-static int init_sqlite(struct datacache *dc)
+static int parse_updflag(unsigned int value)
 {
-	int status = 0;
-	int i;
-	char *errmsg = NULL;
+	int count = 0;
+	unsigned int i;
+	const unsigned int index_start = 31;
+	const unsigned int index_end = 26;
 
-	/* open database */
-	status = sqlite3_open(dc->filepath, &dc->db);
-	if (SQLITE_OK != status) {
-		printf("sqlite> open failed : %d\n", status);
-		return status;
-	}
-
-	if (dc->flag != 0)
-		return 0;
-	/* create table */
-	for (i = 0; i < sizeof(SQL_CREATE)/sizeof(SQL_CREATE[0]); ++i) {
-		status = sqlite3_exec(dc->db, SQL_CREATE[i], NULL, NULL, &errmsg);
-		if (SQLITE_OK != status) {
-			printf("sqlite> create table failed : %d %s\n", status, errmsg);
-			goto err;
-		}
-	}
-	dc->flag = 1;
-	
-	return 0;
-
-err:
-	sqlite3_close(dc->db);
-	return status;
-}
-
-static int parse_flag(unsigned int flag)
-{
-	int ret = 0;
-	unsigned char i;
-
-	for (i = 31; i >= 26; --i) {
-		if (flag & (1<<i))
+	for (i = index_start; i >= index_end; --i) {
+		if (value & (1<<i))
 			break;
-		++ret;
+		++count;
 	}
 
-	return ret;
+	if (count > (index_start - index_end))
+		return -1;
+
+	return count;
 }
 
 int update_cache(unsigned int updflag)
 {
-	char *errmsg;
-	int ret;
+	int status = -1;
 	int updtype;
 
-	if (pcache->updtype != (-1)) {
-		printf("do not need to update.\n");
-		return 0;
-	}
-	
-	pcache->updflag = updflag;
+	if (updflag == 0)
+		return -1;
 
-	char sql[128] = {'\0'};
-	snprintf(sql, sizeof(sql), "update devInfo set updFlags=%d where serialNum='%s'", updflag, msgid);
-	ret = sqlite3_exec(pcache->db, sql, NULL, NULL, &errmsg);
-	if (SQLITE_OK != ret) {
-		printf("sqlite exec failed : %d: %s\n", ret, errmsg);
-		return ret;
+	datacache.upd_flag = updflag;
+	devinfo_exec_sql(SQL_UPDATE, DEVINFO_UPDFLAGS, &datacache.dev_info);
+
+	updtype = parse_updflag(updflag);
+	if (updtype < 0) {
+		printf("error updtype\n");
+		datacache.upd_flag = 0;
+		devinfo_exec_sql(SQL_UPDATE, DEVINFO_UPDFLAGS, &datacache.dev_info);
+		return 1;
 	}
 
-	updtype = parse_flag(pcache->updflag);
-	pcache->sql_exec = SQL_UPDATE;
 	switch (updtype) {
 	case 0:
-		ret = request_dev_info();
+		status = request_dev_info();
 		break;
 	case 1:
-		ret = request_group_discuss();
+		status = request_group_discuss();
 		break;
 	case 2:
-		ret = request_group_share();
+		status = request_group_share();
 		break;
 	case 3:
-		ret = request_user_defined_list();
+		status = request_user_defined_list();
 		break;
 	case 4:
-		ret = request_voice_list();
+		status = request_voice_list();
 		break;
 	case 5:
-		ret = request_album_list();
+		status = request_album_list();
+		break;
+	default:
 		break;
 	}
 
-	if (ret == 0) {
-		printf("request update [%d] OK.\n", updtype);
-		pcache->updtype = updtype;
-	} else {
-		printf("request update [%d] failed!\n", updtype);
-		pcache->updtype = -1;
+	if (status < 0) {
+		printf("## update cache failed!\n");
+		return status;
 	}
+
+	/* clear flag */
+	datacache.upd_flag = 0;
+	devinfo_exec_sql(SQL_UPDATE, DEVINFO_UPDFLAGS, &datacache.dev_info);
 
 	return 0;
 }
@@ -670,91 +821,93 @@ static int request_init_cache(void)
 {
 	int ret;
 
-	pcache->sql_exec = SQL_INSERT;
-	ret = request_dev_info();
+	if (sql_table_rows("devInfo", datacache.db) > 0)
+		ret = devinfo_exec_sql(SQL_UPDATE, DEVINFO_DEFAULT, &datacache.dev_info);
+	else
+		ret = devinfo_exec_sql(SQL_INSERT, DEVINFO_DEFAULT, &datacache.dev_info);
 	if (ret != 0)
 		return ret;
-/*
-	pcache->sql_exec = SQL_INSERT;
+
 	ret = request_group_discuss();
 	if (ret != 0)
 		return ret;
 
-	pcache->sql_exec = SQL_INSERT;
 	ret = request_group_share();
 	if (ret != 0)
 		return ret;
 
-	pcache->sql_exec = SQL_INSERT;
 	ret = request_user_defined_list();
 	if (ret != 0)
 		return ret;
 
-	pcache->sql_exec = SQL_INSERT;
 	ret = request_voice_list();
 	if (ret != 0)
 		return ret;
 
-	pcache->sql_exec = SQL_INSERT;
 	ret = request_album_list();
 	if (ret != 0)
 		return ret;
-*/
+
 	return 0;
 }
 
-int init_datacache(void)
+int init_sqlite(void)
 {
-	int ret = -1;
+	int ret;
+	int i;
+	char *errmsg = NULL;
+	datacache_t *dc = &datacache;
 
-	pcache = (struct datacache *)malloc(sizeof(struct datacache));
-	if (NULL == pcache) {
-		printf("malloc failed\n");
-		goto err1;
+	dc->filepath = DATABASE_PATH;
+	dc->db = NULL;
+
+	/* open database */
+	ret = sqlite3_open(dc->filepath, &dc->db);
+	if (SQLITE_OK != ret) {
+		printf("## sqlite open failed : %d\n", ret);
+		return ret;
 	}
 
-	pcache->filepath = DATABASE_PATH;
-	pcache->db = NULL;
-	pcache->flag = 0;
-	pcache->sql_exec = SQL_DEFAULT;
-	pcache->updtype = -1;
-
-	/* open database and create tables */	
-	ret = init_sqlite(pcache);
-	if (ret != 0) {
-		printf("init sqlite failed!\n");
-		goto err2;
+	/* create tables */
+	for (i = 0; i < sizeof(SQL_CREATE)/sizeof(SQL_CREATE[0]); ++i) {
+		ret = sqlite3_exec(dc->db, SQL_CREATE[i], NULL, NULL, &errmsg);
+		if (SQLITE_OK != ret) {
+			printf("## sqlite create table failed : %d %s\n", ret, errmsg);
+			sqlite3_close(dc->db);
+			return ret;
+		}
 	}
 
+	return 0;
+}
+
+int init_datacache(const datacache_t *cache)
+{
+	int ret;
+
+	memcpy(datacache.dev_info.serial_num, \
+		msgid, \
+		sizeof(msgid));
+	strcpy(datacache.dev_info.nick_name, \
+		cache->dev_info.nick_name);
+	datacache.upd_flag = 0;
+	
 	ret = request_init_cache();
 	if (ret != 0) {
-		printf("request init cache failed!\n");
-		goto err2;
+		printf("## %s(): request init cache failed!\n", __func__);
+		return ret;
 	}
 
-	printf("\n##---------------- % init datacache OK. % --------------------##\n");
+	printf("## %s() return OK.\n", __func__);
 	
 	return 0;
-
-err2:
-	free(pcache);
-err1:
-	return ret;
 }
 
 void clear_datacache(void)
 {
-	/* delete group discuss and sound */
-
-	/* save sound list and file */
-
-	/* save album list and file */
-}
-
-void exit_datacache(void)
-{
-	clear_datacache();
-	sqlite3_close(pcache->db);
-	free(pcache);
+	groupdiscuss_exec_sql(SQL_DELETE, NULL);
+	groupshare_exec_sql(SQL_DELETE, NULL);
+	sqlite3_close(datacache.db);
+	datacache_zero(&datacache);
 }
 
