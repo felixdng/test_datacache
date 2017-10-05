@@ -14,10 +14,11 @@ static const int SN = 4;
 static const int ADLER32 = 8;
 static const int maxLineLength = 20000;
 char uid[37]="57d99d89-caab-482a-a0e9-a0a803eed3ba";
-char * encode(int msgType, int sn, unsigned char* data, int length,
-		char* destData) {
-        int i;
-/*        char uuidBytes[37];
+
+char * encode(int msgType, int sn, unsigned char* data, int length, char* destData)
+{
+	int i;
+/*  char uuidBytes[37];
 	int i;
 	random_uuid(uuidBytes);
 	printf("uuidbytes: ");
@@ -26,6 +27,7 @@ char * encode(int msgType, int sn, unsigned char* data, int length,
 		printf(" %d, ", uuidBytes[i]);
 	}
 	printf("\n");*/
+
 	char typeBytes[TYPE];
 	int2Bytes(msgType, typeBytes);
 	char snBytes[SN];
@@ -45,13 +47,13 @@ char * encode(int msgType, int sn, unsigned char* data, int length,
 			ADLER32);
 	memcpy(destData + UUID_LENGTH + TYPE + SN + LENGTH + length + ADLER32,
 			typeBytes, TYPE);
+/*
 	printf("encode data: ");
-
 	for (i = 0; i < UUID_LENGTH + TYPE + SN + LENGTH + length + ADLER32; ++i) {
 		printf(" %d, ", destData[i]);
 	}
-    
 	printf("\n");
+*/
 	return destData; 
 }
 
