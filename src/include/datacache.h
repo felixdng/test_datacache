@@ -77,12 +77,13 @@ extern int groupshare_exec_sql(dc_sql_exec_type_t type, dc_group_voice_t *obj);
 extern int voicelist_exec_sql(dc_sql_exec_type_t type, dc_voicelist_t *obj);
 extern int albumlist_exec_sql(dc_sql_exec_type_t type, dc_albumlist_t *obj);
 
+extern int response_dev_info(char *msgBytes, int len);
 extern int response_group_discuss(char *msgBytes, int len);
 extern int response_group_share(char *msgBytes, int len);
-extern int response_user_defined_list(char *msgBytes, int len);
+extern int response_custom_list(char *msgBytes, int len);
 extern int response_voice_list(char *msgBytes, int len);
 extern int response_album_list(char *msgBytes, int len);
-
+extern int response_pull_voice_list(char *msgBytes, int len);
 
 extern int update_cache(unsigned int updflag);
 extern int init_sqlite(void);

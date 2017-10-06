@@ -16,6 +16,8 @@
 #include <protob/HwPullDiscussResp.pb.h>
 #include <protob/HwPullVoiceReq.pb.h>
 #include <protob/HwPullVoiceResp.pb.h>
+#include <protob/HwPullVoiceListReq.pb.h>
+#include <protob/HwPullVoiceListResp.pb.h>
 #include <protob/HwDLLocalStatusReq.pb.h>
 #include <protob/HwDLLocalStatusResp.pb.h>
 
@@ -44,7 +46,7 @@ static const char *SQL_CREATE[] = {
 	"create table if not exists devInfo(serialNum nvarchar(100), nickName nvarchar(100), updFlags integer)",
 	"create table if not exists groupDiscuss(discussId integer, discussContent nvarchar(100), createTime integer)",
 	"create table if not exists groupShare(voiceId integer, voicePath nvarchar(100), shareTime integer, voiceType integer)",
-	"create table if not exists userDefinedList(relType integer, relId nvarchar(100), allCount integer)",
+	"create table if not exists customList(relType integer, relId nvarchar(100), allCount integer)",
 	"create table if not exists voiceList(voiceId integer, voiceName nvarchar(100), voicePath nvarchar(100), \
 										voicePic nvarchar(100), voiceLength integer, voiceDesc nvarchar(100), \
 										voiceSize integer, downloadTime integer, isCustom bool, appVoiceType integer)",
@@ -357,6 +359,35 @@ int albumlist_exec_sql(dc_sql_exec_type_t type, dc_albumlist_t *obj)
 	return 0;
 }
 
+int response_dev_info(char *msgBytes, int len)
+{
+	HwInfoResp *rmessage = (HwInfoResp *)malloc(sizeof(HwInfoResp));
+	if (rmessage == NULL) {
+		printf("malloc failed.\n");
+		return -1;
+	}
+
+	pb_istream_t input = pb_istream_from_buffer(msgBytes, len);
+	if (!pb_decode(&input, HwInfoResp_fields, rmessage)) {
+		printf("Decoding failed: %s\n", PB_GET_ERROR(&input));
+		free(rmessage);
+		return -1;
+	}
+
+	printf("-------- %s() ---------\n", __func__);
+	printf("## state: %d\n", rmessage->state);
+	printf("## msg: %s\n", rmessage->msg);
+	printf("## status: %d\n", rmessage->result.status);
+	printf("## nickname: %s\n", rmessage->result.nickname);
+
+	strcpy(datacache.dev_info.nick_name, rmessage->result.nickname);
+	devinfo_exec_sql(SQL_UPDATE, DEVINFO_NICKNAME, &datacache.dev_info);
+
+	free(rmessage);
+
+	return 0;
+}
+
 static int request_dev_info(void)
 {
 	int ret;
@@ -364,29 +395,24 @@ static int request_dev_info(void)
 	int msg_len;
 	int i;
 	char *destdata = NULL;
-/*
+
 	HwInfoReq *message = (HwInfoReq *)malloc(sizeof(HwInfoReq));
 	if (message == NULL) {
 		printf("malloc failed.\n");
 		return -1;
 	}
-*/
-	HwInfoReq message = HwInfoReq_init_zero;
+
 	pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
 
 	for (i = 0; i < 16; i++)
-		message.serialNum[i] = msgid[i];
+		message->serialNum[i] = msgid[i];
 
-	ret = pb_encode(&stream, HwInfoReq_fields , &message);
+	ret = pb_encode(&stream, HwInfoReq_fields , message);
 	msg_len = stream.bytes_written;
 	if (!ret) {
 		printf("Encoding failed: %s\n", PB_GET_ERROR(&stream));  
 		goto err1;
 	}
-
-	printf(">> pb_encode: ");
-	for (i = 0; i < msg_len; i++) printf("%d",buf[i]);
-	printf(" <<\n");
 
 	destdata = (char *)malloc((60 + msg_len) * sizeof(char));
 	if (destdata == NULL) {
@@ -400,65 +426,33 @@ static int request_dev_info(void)
 		printf("socket send failed!\n");
 		goto err2;
 	}
-#if 0
-	uint8_t recvbuff[1024];
-	memset(recvbuff,0,sizeof(recvbuff));
-	ret = recv(sockee, recvbuff, sizeof(recvbuff), 0);
-	if (ret < 0) {
-		printf("recv error\n");
-		goto err2;
-	}
-	
-	char msgBytes[1024];
-	int msglen = 0;
-	bzero(msgBytes, sizeof(msgBytes));
-	decode_msgbuf(recvbuff, ret, msgBytes, &msglen);
 
-	HwInfoResp *rmessage = (HwInfoResp *)malloc(sizeof(HwInfoResp));
-	if (rmessage == NULL) {
-		printf("malloc failed.\n");
-		goto err2;
-	}
+	printf("## %s() return OK.\n", __func__);
 
-	pb_istream_t input = pb_istream_from_buffer(msgBytes, msglen);
-	ret = pb_decode(&input, HwInfoResp_fields, rmessage);
-	if (!ret) {
-		printf("Decoding failed: %s\n", PB_GET_ERROR(&input));
-		goto err3;
-	}
-	printf(">>>>>>>>>>>>>>> nickName: %s <<<<<<<<<<<<<<<<<\n", rmessage->nickName);
-
-	//datacache.dev_info.nick_name = ;
-	//datacache.dev_info.serial_num= ;
-	devinfo_exec_sql(SQL_UPDATE, &datacache);
-#endif
-	//free(rmessage);
 	free(destdata);
-	//free(message);
+	free(message);
 
 	return 0;
 
-//err3:
-	//free(rmessage);
 err2:
 	free(destdata);
 err1:
-	//free(message);
+	free(message);
 	return ret;
 }
 
 static bool group_discuss_objdiscuss(pb_istream_t *stream, const pb_field_t *field, void **arg)
 {
-	pb_wire_type_t wire_type;
-    uint32_t tag;
-    bool eof;
+	//pb_wire_type_t wire_type;
+    //uint32_t tag;
+    //bool eof;
 
     HwPullDiscussResp_ObjDiscuss *obj = (HwPullDiscussResp_ObjDiscuss *)malloc(sizeof(HwPullDiscussResp_ObjDiscuss));
 	if (obj == NULL) {
 		printf("malloc failed\n");
 		return false;
 	}
-    pb_decode_tag(stream, &wire_type, &tag, &eof);
+    //pb_decode_tag(stream, &wire_type, &tag, &eof);
     if (!pb_decode(stream, HwPullDiscussResp_ObjDiscuss_fields, obj)) {
 		fprintf(stderr, "%s(): Decode failed: %s\n", __func__, PB_GET_ERROR(stream));
 		free(obj);
@@ -495,6 +489,7 @@ int response_group_discuss(char *msgBytes, int len)
 		return -1;
 	}
 
+	printf("-------- function: %s() ---------\n", __func__);
 	printf("## state: %d\n", response->state);
 	printf("## msg: %s\n", response->msg);
 	printf("## thisReqTime: %d\n", response->result.thisReqTime);
@@ -558,7 +553,6 @@ err1:
 
 static bool group_share_objvoice(pb_istream_t *stream, const pb_field_t *field, void **arg)
 {
-#if 0
 	char *errmsg;
 
 	HwPullVoiceResp_ObjVoice *obj = (HwPullVoiceResp_ObjVoice *)malloc(sizeof(HwPullVoiceResp_ObjVoice));
@@ -573,33 +567,39 @@ static bool group_share_objvoice(pb_istream_t *stream, const pb_field_t *field, 
         return false;
     }
 
-	printf("decode group share: %d %s %d %d\n", obj->voiceId, obj->voicePath, obj->shareTime, obj->voiceType);
-	groupshare_exec_sql(SQL_INSERT, obj);
+	printf("## voiceId: %d\n", obj->voiceId);
+	printf("## voicePath: %s\n", obj->voicePath);
+	printf("## createTime: %d\n", obj->createTime);
+	printf("## voiceType: %d\n", obj->voiceType);
 
 	free(obj);
-#endif
+
 	return true;
 }
 
 int response_group_share(char *msgBytes, int len)
 {
-#if 0
 	HwPullVoiceResp *response = (HwPullVoiceResp *)malloc(sizeof(HwPullVoiceResp));
 	if (response == NULL) {
 		printf("malloc failed\n");
 		return -1;
 	}
 
-	pb_istream_t input = pb_istream_from_buffer(msgBytes, msglen);
-	response->objVoice.funcs.decode = &group_share_objvoice;
+	pb_istream_t input = pb_istream_from_buffer(msgBytes, len);
+	response->result.objVoice.funcs.decode = &group_share_objvoice;
 	if (!pb_decode(&input, HwPullVoiceResp_fields, response)) {
 		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(&input));
 		free(response);
 		return -1;
 	}
 
+	printf("-------- function: %s() ---------\n", __func__);
+	printf("## state: %d\n", response->state);
+	printf("## msg: %s\n", response->msg);
+	printf("## thisReqTime : %d\n", response->result.thisReqTime);
+
 	free(response);
-#endif
+
 	return 0;
 }
 
@@ -657,28 +657,244 @@ err1:
 	return ret;
 }
 
-int response_user_defined_list(char *msgBytes, int len)
+static bool pull_voice_list_objvoice(pb_istream_t *stream, const pb_field_t *field, void **arg)
 {
+	char *errmsg;
 
+	HwPullVoiceListResp_ObjVoice *obj = (HwPullVoiceListResp_ObjVoice *)malloc(sizeof(HwPullVoiceListResp_ObjVoice));
+	if (obj == NULL) {
+		printf("malloc failed\n");
+		return false;
+	}
+
+    if (!pb_decode(stream, HwPullVoiceListResp_ObjVoice_fields, obj)) {
+		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(stream));
+		free(obj);
+        return false;
+    }
+
+	printf("## voiceId: %d\n", obj->voiceId);
+	printf("## voiceType: %d\n", obj->voiceType);
+	printf("## voicePath: %s\n", obj->voicePath);
+	printf("## createTime: %d\n", obj->createTime);
+	printf("## orderBy: %d\n", obj->orderBy);
+	printf("## voiceName: %s\n", obj->voiceName);
+
+	free(obj);
+
+	return true;
+}
+
+int response_pull_voice_list(char *msgBytes, int len)
+{
+	HwPullVoiceListResp *response = (HwPullVoiceListResp *)malloc(sizeof(HwPullVoiceListResp));
+	if (response == NULL) {
+		printf("malloc failed\n");
+		return -1;
+	}
+
+	pb_istream_t input = pb_istream_from_buffer(msgBytes, len);
+	response->objVoice.funcs.decode = &pull_voice_list_objvoice;
+	if (!pb_decode(&input, HwPullVoiceListResp_fields, response)) {
+		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(&input));
+		free(response);
+		return -1;
+	}
+
+	printf("-------- function: %s() ---------\n", __func__);
+	printf("## state: %d\n", response->state);
+	printf("## msg: %s\n", response->msg);
+	printf("## allCount : %d\n", response->allCount);
+
+	free(response);
 	return 0;
 }
 
-static int request_user_defined_list(void)
+static int request_pull_voice_list(int page, int pageSize, int relType, char *relId)
 {
+	int ret;
+	int i;
+	unsigned char buf[128];
+	int len;
+	char *destdata = NULL;
+
+	HwPullVoiceListReq *message = (HwPullVoiceListReq *)malloc(sizeof(HwPullVoiceListReq));
+	if (message == NULL) {
+		printf("malloc failed.\n");
+		return -1;
+	}
+
+	pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
+
+	message->page = page;
+	message->pageSize = pageSize;
+	message->relType = relType;
+	if (relId != NULL)
+		strncpy(message->relId, relId, sizeof(message->relId));
+	for (i = 0; i < 16; i++)
+		message->serialNum[i] = msgid[i];
+
+	ret = pb_encode(&stream, HwPullVoiceListReq_fields , message);
+	len = stream.bytes_written;
+	if (!ret) {
+		printf("%s(): Encoding failed: %s\n", __func__, PB_GET_ERROR(&stream));
+		goto err1;
+	}
+
+	destdata = (char*) malloc((60 + len) * sizeof(char));
+	if (destdata == NULL) {
+		printf("malloc failed.\n");
+		goto err1;
+	}
+
+	encode(0xf011f047, 1, buf, len, destdata);
+	ret = send(sockee, destdata, 60+len, 0);
+	if (ret < 0) {
+		printf("socket send failed!\n");
+		goto err2;
+	}
+
+	free(destdata);
+	free(message);
+
+	return 0;
+
+err2:
+	free(destdata);
+err1:
+	free(message);
+	return ret;
+}
+
+static bool custom_list_objvoice(pb_istream_t *stream, const pb_field_t *field, void **arg)
+{
+	char *errmsg;
+
+	HwPullVoiceListResp_ObjVoice *obj = (HwPullVoiceListResp_ObjVoice *)malloc(sizeof(HwPullVoiceListResp_ObjVoice));
+	if (obj == NULL) {
+		printf("malloc failed\n");
+		return false;
+	}
+
+    if (!pb_decode(stream, HwPullVoiceListResp_ObjVoice_fields, obj)) {
+		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(stream));
+		free(obj);
+        return false;
+    }
+
+	printf("## voiceId: %d\n", obj->voiceId);
+	printf("## voiceType: %d\n", obj->voiceType);
+	printf("## voicePath: %s\n", obj->voicePath);
+	printf("## createTime: %d\n", obj->createTime);
+	printf("## orderBy: %d\n", obj->orderBy);
+	printf("## voiceName: %s\n", obj->voiceName);
+
+	free(obj);
+
+	return true;
+}
+
+int response_custom_list(char *msgBytes, int len)
+{
+	HwPullVoiceListResp *response = (HwPullVoiceListResp *)malloc(sizeof(HwPullVoiceListResp));
+	if (response == NULL) {
+		printf("malloc failed\n");
+		return -1;
+	}
+
+	pb_istream_t input = pb_istream_from_buffer(msgBytes, len);
+	response->objVoice.funcs.decode = &custom_list_objvoice;
+	if (!pb_decode(&input, HwPullVoiceListResp_fields, response)) {
+		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(&input));
+		free(response);
+		return -1;
+	}
+
+	printf("-------- function: %s() ---------\n", __func__);
+	printf("## state: %d\n", response->state);
+	printf("## msg: %s\n", response->msg);
+	printf("## allCount : %d\n", response->allCount);
+
+	free(response);
+	return 0;
+}
+
+static int request_custom_list(void)
+{
+	int ret;
+
+	ret = request_pull_voice_list(1, 10, 1, NULL);
+	if (ret != 0) {
+		printf("## %s() : request failed!\n", __func__);
+		return ret;
+	}
 
 	printf("## %s() return OK.\n", __func__);
 
 	return 0;
 }
 
+static bool voice_list_objvoice(pb_istream_t *stream, const pb_field_t *field, void **arg)
+{
+	char *errmsg;
+
+	HwPullVoiceListResp_ObjVoice *obj = (HwPullVoiceListResp_ObjVoice *)malloc(sizeof(HwPullVoiceListResp_ObjVoice));
+	if (obj == NULL) {
+		printf("malloc failed\n");
+		return false;
+	}
+
+    if (!pb_decode(stream, HwPullVoiceListResp_ObjVoice_fields, obj)) {
+		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(stream));
+		free(obj);
+        return false;
+    }
+
+	printf("## voiceId: %d\n", obj->voiceId);
+	printf("## voiceType: %d\n", obj->voiceType);
+	printf("## voicePath: %s\n", obj->voicePath);
+	printf("## netPath: %s\n", obj->netPath);
+	printf("## voiceName: %s\n", obj->voiceName);
+
+	free(obj);
+
+	return true;
+}
+
 int response_voice_list(char *msgBytes, int len)
 {
+	HwPullVoiceListResp *response = (HwPullVoiceListResp *)malloc(sizeof(HwPullVoiceListResp));
+	if (response == NULL) {
+		printf("malloc failed\n");
+		return -1;
+	}
 
+	pb_istream_t input = pb_istream_from_buffer(msgBytes, len);
+	response->objVoice.funcs.decode = &voice_list_objvoice;
+	if (!pb_decode(&input, HwPullVoiceListResp_fields, response)) {
+		fprintf(stderr, "Decode failed: %s\n", PB_GET_ERROR(&input));
+		free(response);
+		return -1;
+	}
+
+	printf("-------- function: %s() ---------\n", __func__);
+	printf("## state: %d\n", response->state);
+	printf("## msg: %s\n", response->msg);
+	printf("## allCount : %d\n", response->allCount);
+
+	free(response);
 	return 0;
 }
 
 static int request_voice_list(void)
 {
+	int ret;
+
+	ret = request_pull_voice_list(1, 10, 2, NULL);
+	if (ret != 0) {
+		printf("## %s() : request failed!\n", __func__);
+		return ret;
+	}
 
 	printf("## %s() return OK.\n", __func__);
 
@@ -694,54 +910,17 @@ int response_album_list(char *msgBytes, int len)
 static int request_album_list(void)
 {
 	int ret;
-	int i;
-	unsigned char buf[128];
-	int len;
-	char *destdata = NULL;
+	char relId[] = "123562";
 
-	HwDLLocalStatusReq *message = (HwDLLocalStatusReq *)malloc(sizeof(HwDLLocalStatusReq));
-	if (message == NULL) {
-		printf("malloc failed.\n");
-		return -1;
-	}
-
-	pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
-
-	for (i = 0; i < 16; i++)
-		message->serialNum[i] = msgid[i];
-	
-	ret = pb_encode(&stream, HwDLLocalStatusReq_fields , message);
-	len = stream.bytes_written;
-	if (!ret) {
-		printf("Encoding failed: %s\n", PB_GET_ERROR(&stream));  
-		goto err1;
-	}
-
-	destdata = (char*) malloc((60 + len) * sizeof(char));
-	if (destdata == NULL) {
-		printf("malloc failed.\n");
-		goto err1;
-	}
-
-	encode(0xf011f069, 1, buf, len, destdata);
-	ret = send(sockee, destdata, 60+len, 0);
-	if (ret < 0) {
-		printf("socket send failed!\n");
-		goto err2;
+	ret = request_pull_voice_list(1, 10, 3, relId);
+	if (ret != 0) {
+		printf("## %s() : request failed!\n", __func__);
+		return ret;
 	}
 
 	printf("## %s() return OK.\n", __func__);
 
-	free(destdata);
-	free(message);
-
 	return 0;
-
-err2:
-	free(destdata);
-err1:
-	free(message);
-	return ret;
 }
 
 static int parse_updflag(unsigned int value)
@@ -793,7 +972,7 @@ int update_cache(unsigned int updflag)
 		status = request_group_share();
 		break;
 	case 3:
-		status = request_user_defined_list();
+		status = request_custom_list();
 		break;
 	case 4:
 		status = request_voice_list();
@@ -836,7 +1015,7 @@ static int request_init_cache(void)
 	if (ret != 0)
 		return ret;
 
-	ret = request_user_defined_list();
+	ret = request_custom_list();
 	if (ret != 0)
 		return ret;
 
@@ -885,11 +1064,8 @@ int init_datacache(const datacache_t *cache)
 {
 	int ret;
 
-	memcpy(datacache.dev_info.serial_num, \
-		msgid, \
-		sizeof(msgid));
-	strcpy(datacache.dev_info.nick_name, \
-		cache->dev_info.nick_name);
+	strcpy(datacache.dev_info.serial_num, msgid);
+	strcpy(datacache.dev_info.nick_name, cache->dev_info.nick_name);
 	datacache.upd_flag = 0;
 	
 	ret = request_init_cache();
