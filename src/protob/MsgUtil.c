@@ -19,7 +19,7 @@ void int2Bytes(int num, char *intBytes) {
 	int i;
 	for (i = 0; i < 8; i++) {
 		longBytes[i] = (num >> (8 * (8 - i - 1))) & 0xff;
-                printf("longbyte:%d\n",longBytes[i]);
+                //printf("longbyte:%d\n",longBytes[i]);
 	}
 }
 /*
@@ -118,7 +118,7 @@ short int recoverNetworkBytesOrderShort(const char* orderBytes, int begindex) {
 	for (i = begindex; i < begindex + 8; i++) {
 		sourceNumber <<= 8;
 		sourceNumber |= orderBytes[i] & 0xff;
-               printf("sourceNumber:%d\n",sourceNumber);
+              // printf("sourceNumber:%d\n",sourceNumber);
 	}
 	return sourceNumber;
 }
