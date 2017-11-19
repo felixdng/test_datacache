@@ -162,6 +162,9 @@ void processStream(void)
 	case HARDWARE_TALKBACK_CLOSE:
 		Tclose(msgBytes,ctxBuffer.matchCount);
 		break;
+	case HARDWARE_INFOR:
+		response_dev_info(msgBytes,ctxBuffer.matchCount);
+		break;
 	default:
 		break;
 	}

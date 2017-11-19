@@ -6,7 +6,7 @@ CC = gcc
 CFLAGS = -Wall -Wno-error -g -O2 -I. -I./include/ -I./include/protob
 LDFLAGS = -lpthread -lsqlite3
 
-SRCS = main.c net.c Encoder.c Decoder.c Control.c datacache.c
+SRCS = main.c net.c Encoder.c Decoder.c Control.c datacache.c socktcp.c
 SRCS_PROTOB = $(wildcard protob/*.c)
 
 OBJS = $(patsubst %.c, %.o, $(SRCS))

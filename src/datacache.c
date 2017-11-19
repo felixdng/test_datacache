@@ -380,8 +380,8 @@ int response_dev_info(char *msgBytes, int len)
 	printf("## status: %d\n", rmessage->result.status);
 	printf("## nickname: %s\n", rmessage->result.nickname);
 
-	strcpy(datacache.dev_info.nick_name, rmessage->result.nickname);
-	devinfo_exec_sql(SQL_UPDATE, DEVINFO_NICKNAME, &datacache.dev_info);
+	//strcpy(datacache.dev_info.nick_name, rmessage->result.nickname);
+	//devinfo_exec_sql(SQL_UPDATE, DEVINFO_NICKNAME, &datacache.dev_info);
 
 	free(rmessage);
 
