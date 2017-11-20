@@ -174,7 +174,7 @@ int main(void)
 
     while (1) {
         sleep(5);
-		printf("lalalala--------------\n");
+//		printf("lalalala--------------\n");
     }
 
     close(sockee);

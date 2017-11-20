@@ -322,7 +322,7 @@ static void sock_read_handler(void)
 		//}
 
 		if (rbuff[0] == 240) {
-			//LOG_DEBUG("recv: %s\n", recvBuff);
+			LOG_DEBUG("recv: %s\n", rbuff);
 			if (is_recv) {
 				msginfo_t msg;
 				//msg.type = type;
@@ -338,7 +338,7 @@ static void sock_read_handler(void)
 				decode(rbuff, count);
 			}
 		} else if (rbuff[0] == 176) {
-			//LOG_DEBUG("recv 176\n");
+			LOG_DEBUG("recv 176\n");
 			send(sock_fd, destData, 60, 0);
 		} else {
 			LOG_DEBUG("Receive nothing\n");
@@ -379,7 +379,7 @@ static void *sock_recv_thread(void *arg)
 				LOG_DEBUG("write...\n");
 				sock_write_handler();
 			} else if (FD_ISSET(sock_fd, &readset)) {
-				//LOG_DEBUG("read\n");
+				LOG_DEBUG("read\n");
 				sock_read_handler();
 			}		
 		}
@@ -423,6 +423,7 @@ void socktcp_init(psocktcp_t sc)
 
 	sem_init(&sem_msgrecv, 0, 0);
 	connhost(hostname, port);
+	//connip("192.168.1.105", 5678);
 	create_sock_recv_thread();
 	usleep(5000);
 }
